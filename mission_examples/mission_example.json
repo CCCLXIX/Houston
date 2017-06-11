@@ -37,7 +37,7 @@
 
 			"FailureFlags":
 			{
-				"Time":	"60",
+				"Time":	"10",
 				"Battery": "90",
 				"SystemShutdown":"True",
 				"MaxHeight": "True"

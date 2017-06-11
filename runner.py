@@ -70,21 +70,25 @@ class ROSHandler(object):
         
     def check_command_completion(self, _type, alt, expected_coor, pose, pub):
         local_action_time = time.time()
-
+        success = True
         if _type == 'takeoff':
             while ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
             and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2)))\
             and self.mission_on:
-
                 local_action_time = self.inform_time(local_action_time, 5, \
                     'Waiting to reach alt. Goal: '+ str(alt) +' - Current: '\
                     +str(self.current_local_position[2]))
+            if ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
+            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2))):
+                success = False
         elif _type == 'land':
             while self.current_local_position[2] >= ERROR_LIMIT_DISTANCE and \
             self.mission_on:
                 local_action_time = self.inform_time(local_action_time, 5, \
                     'Waiting to reach land. Goal: ~0' +' - Current: '\
                     +str(self.current_local_position[2]))
+            if self.current_local_position[2] >= ERROR_LIMIT_DISTANCE:
+                success = False
         elif _type == 'goto':
             r = rospy.Rate(10)
             self.lock_min_max_height = True
@@ -96,7 +100,12 @@ class ROSHandler(object):
                 pub.publish(pose)
                 local_action_time = self.inform_time(local_action_time, 2,\
                  'Remaining: ' + str(great_circle(self.current_global_coordinates,expected_coor).meters))
+            if great_circle(self.current_global_coordinates,expected_coor).meters\
+             >= ERROR_LIMIT_DISTANCE:
+                success = False
             self.lock_min_max_height = False
+
+        return success
 
 
 
@@ -124,8 +133,11 @@ class ROSHandler(object):
             Log("System Taking off...")
         else:
             Error("System did not take off.")
-        self.check_command_completion('takeoff', alt, None, None, None)
-        Log('System reached height')
+        succes = self.check_command_completion('takeoff', alt, None, None, None)
+        if succes:
+            Log('System reached height')
+        else:
+            Log('System did not reach height')
         
         
     #def goto_command(self, lat, longitud):
@@ -138,9 +150,11 @@ class ROSHandler(object):
             Log("System landing...")
         else:
             Error("System is not landing.")
-        self.check_command_completion('land', None, None, None, None)
-        Log('System has landed')
-
+        success = self.check_command_completion('land', None, None, None, None)
+        if success:
+            Log('System has landed')
+        else:
+            Log('System did not land')
 
 
     def get_current_x_y(self):
@@ -220,9 +234,12 @@ class ROSHandler(object):
             self.current_global_coordinates).meters
 
         Log('Expected distance to travel: ' + str(expected_distance))
-        self.check_command_completion('goto', None, expected_coor, pose, \
+        success = self.check_command_completion('goto', None, expected_coor, pose, \
             goto_publisher)
-        Log('Position reached')
+        if success:
+            Log('Position reached')
+        else:
+            Log('System did not reach position')
 
     # Callback for local position sub. It also updates the min and the max height
     def ros_monitor_callback_local_position(self, data):
@@ -272,12 +289,12 @@ class ROSHandler(object):
             return temp_time
 
     def check_failure_flags(self, failure_flags):
-        if time.time() - self.starting_time >= failure_flags['Time']:
+        if time.time() - self.starting_time >= float(failure_flags['Time']):
             return True, 'Time exceeded'
-        #elif self.battery[0] - self.battery[1] >= failure_flags['Battery']:
-        #    return True, 'Battery exceeded'
-        #elif self.current_local_position[2] >= failure_flags['MaxHeight']:
-        #    return True, 'Max Height exceeded'
+        elif self.battery[0] - self.battery[1] >= float(failure_flags['Battery']):
+            return True, 'Battery exceeded'
+        elif self.current_local_position[2] >= failure_flags['MaxHeight']:
+            return True, 'Max Height exceeded'
         else:
             return False, None
 
@@ -304,7 +321,7 @@ class ROSHandler(object):
         
         
 
-        report_data = {'QualityAttributes':[],'FailureFlags':None}
+        report_data = {'QualityAttributes':[],'FailureFlags':'None'}
         temp_time   = time.time() #time used for failure flags and time inform
         qua_time    = time.time() #time used for the rate of attribute reports
         while self.mission_on:
@@ -313,6 +330,7 @@ class ROSHandler(object):
             if fail:
                 report_data['FailureFlags'] = reason
                 self.mission_on = False
+
                 
             else:
                 qua_time, qua_report = self.check_quality_attributes(\
