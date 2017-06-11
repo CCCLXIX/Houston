@@ -11,8 +11,8 @@
 			{
 				"Type": "PTP",
 				"Alt" : "5.0",
-				"x":	"5.0",
-				"y":	"5.0",
+				"x":	"10.0",
+				"y":	"-3.0",
 				"z":	"5.0",
 				"x_d":	"0.0",
 				"y_d":	"0.0",
@@ -37,7 +37,7 @@
 
 			"FailureFlags":
 			{
-				"Time":	"30.0",
+				"Time":	"60",
 				"Battery": "90",
 				"SystemShutdown":"True",
 				"MaxHeight": "True"

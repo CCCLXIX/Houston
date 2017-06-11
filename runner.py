@@ -8,7 +8,7 @@ import sys
 import rospy
 import math
 import thread
-from geopy.distance import vincenty
+from geopy.distance import great_circle
 
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
@@ -16,12 +16,12 @@ from mavros_msgs.msg import BatteryStatus
 from sensor_msgs.msg import NavSatFix
 from mavros_msgs.srv import CommandLong, SetMode, CommandBool, CommandTOL
 
-
+# TODO: Check for mavros first 
 # Command IDs in MAVLINK
 #COMMANDS = {"TAKEOFF": 24, "SETMODE": 176, "ARM": 400 }
 #home coordinates
 HOME_COORDINATES              = (-35.3632607, 149.1652351) 
-ERROR_LIMIT_DISTANCE          = .3 # 30cm TODO: pick a better name 
+ERROR_LIMIT_DISTANCE          = .4 # 30cm TODO: pick a better name 
 TIME_INFORM_RATE              = 10 # seconds. How often log time
 QUALITY_ATTRUBUTE_INFORM_RATE = 5  # seconds. 
 
@@ -60,7 +60,6 @@ class ROSHandler(object):
         self.battery                    = [0,0]
         self.min_max_height             = [0,0]
         self.lock_min_max_height        = False
-
         self.initial_global_coordinates = [0,0]
         self.initial_local_position     = [0,0,0]
 
@@ -74,27 +73,29 @@ class ROSHandler(object):
 
         if _type == 'takeoff':
             while ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
-            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2))):
+            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2)))\
+            and self.mission_on:
 
                 local_action_time = self.inform_time(local_action_time, 5, \
                     'Waiting to reach alt. Goal: '+ str(alt) +' - Current: '\
                     +str(self.current_local_position[2]))
         elif _type == 'land':
-            while self.current_local_position[2] >= ERROR_LIMIT_DISTANCE:
+            while self.current_local_position[2] >= ERROR_LIMIT_DISTANCE and \
+            self.mission_on:
                 local_action_time = self.inform_time(local_action_time, 5, \
                     'Waiting to reach land. Goal: ~0' +' - Current: '\
                     +str(self.current_local_position[2]))
-        elif _type == 'pos':
-
+        elif _type == 'goto':
+            r = rospy.Rate(10)
             self.lock_min_max_height = True
-            while vincenty(expected_coor, self.current_global_coordinates).meters\
-             >= ERROR_LIMIT_DISTANCE: 
-
-                distance_traveled = vincenty(self.initial_global_coordinates, \
+            while great_circle(self.current_global_coordinates,expected_coor).meters\
+             >= ERROR_LIMIT_DISTANCE and self.mission_on: 
+                r.sleep()
+                distance_traveled = great_circle(self.initial_global_coordinates, \
                     self.current_global_coordinates).meters
                 pub.publish(pose)
                 local_action_time = self.inform_time(local_action_time, 2,\
-                 'Distance traveled: ' + str(distance_traveled))
+                 'Remaining: ' + str(great_circle(self.current_global_coordinates,expected_coor).meters))
             self.lock_min_max_height = False
 
 
@@ -141,43 +142,86 @@ class ROSHandler(object):
         Log('System has landed')
 
 
+
+    def get_current_x_y(self):
+        x = great_circle(HOME_COORDINATES, ( HOME_COORDINATES[0], self.current_global_coordinates[1],)).meters
+        y = great_circle(HOME_COORDINATES, (self.current_global_coordinates[0], HOME_COORDINATES[1],)).meters
+        if HOME_COORDINATES[0]> self.current_global_coordinates[0]:
+            y *= -1
+        if HOME_COORDINATES[1]> self.current_global_coordinates[1]:
+            x *= -1
+
+
+        return x, y
+
+    def get_expected_lat_long(self, x_y, target, x_distance, y_distance):
+        expected_lat  = 0
+        expected_long = 0
+        if float("{0:.0f}".format(math.fabs(y_distance))) == 0:
+            expected_lat = self.initial_global_coordinates[0]
+        else:
+            if target[1]> x_y[1]:
+                expected_lat  = self.initial_global_coordinates[0] + ((y_distance / \
+                    6378000.0) * (180.0/math.pi))
+            else:
+                expected_lat  = self.initial_global_coordinates[0] - ((y_distance / \
+                    6378000.0) * (180.0/math.pi))
+        if float("{0:.0f}".format(math.fabs(x_distance))) == 0:
+            expected_long = self.initial_global_coordinates[1]
+        else:
+            if target[0]> x_y[0]:
+                expected_long = self.initial_global_coordinates[1] + ((x_distance / \
+                    6378000.0) * (180.0/math.pi) / math.cos(math.radians(\
+                    self.initial_global_coordinates[0])))
+            else:
+                expected_long = self.initial_global_coordinates[1] - ((x_distance / \
+                    6378000.0) * (180.0/math.pi) / math.cos(math.radians(\
+                    self.initial_global_coordinates[0])))
+        return expected_lat, expected_long
+
+
     # Commands the system to a given location. Verifies the end of the publications
     # by comparing the current position with the expected position.
     # Need to add z for angular displacement. 
     def ros_command_goto(self, target):
         goto_publisher = rospy.Publisher('/mavros/setpoint_position/local',\
-         PoseStamped, queue_size=10)
+            PoseStamped, queue_size=10)
         pose = PoseStamped()
         pose.pose.position.x = target[0]
         pose.pose.position.y = target[1]
         pose.pose.position.z = target[2]
-        current_coor = (self.current_global_coordinates[0], \
-            self.current_global_coordinates[1])
         expected_lat      = None
         expected_long     = None
         expected_coor     = None
         expected_distance = None
 
-        # 0,0 is to HOME which is the starting position of the system. 
+        # 0,0 is set to HOME which is the starting position of the system. 
         if target[0] == 0 and target[1] == 0:
             expected_coor = (HOME_COORDINATES[0], HOME_COORDINATES[1])
-            expected_distance = vincenty(self.initial_global_coordinates, expected_coor).meters
+            expected_distance = great_circle(self.initial_global_coordinates, \
+                expected_coor).meters
+            Log('Using home coordinates: initial' + str(self.initial_global_coordinates)\
+                + ' expected: ' + str(expected_coor))
         else:
-            # Check for a better solution 
-            # TODO: acount for 0 latitude  (x value)
-            expected_lat = self.current_global_coordinates[0] + (target[0] * \
-                0.000008983)
-            expected_long = self.current_global_coordinates[1] + ((target[0] *\
-             0.000008983)/ \
-                math.cos(self.current_global_coordinates[0] * 0.018))
+            current_x, current_y = self.get_current_x_y()
+            x_y = (current_x, current_y)
+            x_distance = euclidean((target[0], 0),(current_x, 0)) - ERROR_LIMIT_DISTANCE
+            y_distance = euclidean((0, target[1]),(0, current_y)) - ERROR_LIMIT_DISTANCE
+            expected_lat, expected_long = self.get_expected_lat_long(x_y, target, \
+                x_distance, y_distance)
             expected_coor = (expected_lat, expected_long)
-            expected_distance = vincenty(self.current_global_coordinates, expected_coor).meters
+            Log('Using other coordinates: initial' + str(\
+                self.initial_global_coordinates)\
+                + ' expected: ' + str(expected_coor))
+            expected_distance = great_circle(self.initial_global_coordinates, \
+                expected_coor).meters
 
-        distance_traveled = vincenty(self.initial_global_coordinates, current_coor).meters
+        distance_traveled = great_circle(self.initial_global_coordinates, \
+            self.current_global_coordinates).meters
 
-        local_action_time = time.time()
         Log('Expected distance to travel: ' + str(expected_distance))
-        self.check_command_completion('pos', None, expected_coor, pose, goto_publisher)
+        self.check_command_completion('goto', None, expected_coor, pose, \
+            goto_publisher)
         Log('Position reached')
 
     # Callback for local position sub. It also updates the min and the max height
@@ -230,10 +274,10 @@ class ROSHandler(object):
     def check_failure_flags(self, failure_flags):
         if time.time() - self.starting_time >= failure_flags['Time']:
             return True, 'Time exceeded'
-        elif self.battery[0] - self.battery[1] >= failure_flags['Battery']:
-            return True, 'Battery exceeded'
-        elif self.current_local_position[2] >= failure_flags['MaxHeight']:
-            return True, 'Max Height exceeded'
+        #elif self.battery[0] - self.battery[1] >= failure_flags['Battery']:
+        #    return True, 'Battery exceeded'
+        #elif self.current_local_position[2] >= failure_flags['MaxHeight']:
+        #    return True, 'Max Height exceeded'
         else:
             return False, None
 
@@ -258,16 +302,21 @@ class ROSHandler(object):
         battery_sub     = rospy.Subscriber('/mavros/battery', BatteryStatus, \
           self.ros_monitor_callback_battery)
         
+        
+
         report_data = {'QualityAttributes':[],'FailureFlags':None}
         temp_time   = time.time() #time used for failure flags and time inform
         qua_time    = time.time() #time used for the rate of attribute reports
-        while not rospy.is_shutdown():
+        while self.mission_on:
             temp_time = self.inform_time(temp_time)
             fail, reason = self.check_failure_flags(failure_flags)
             if fail:
                 report_data['FailureFlags'] = reason
+                self.mission_on = False
+                
             else:
-                qua_time, qua_report = self.check_quality_attributes(quality_attributes,report_data['QualityAttributes'], qua_time)
+                qua_time, qua_report = self.check_quality_attributes(\
+                    quality_attributes,report_data['QualityAttributes'], qua_time)
                 report_data['QualityAttributes'] = qua_report
 
         report_generator = Report(self, report_data)
@@ -320,6 +369,7 @@ class Mission(object):
         try:
             thread.start_new_thread(ros.ros_monitor, (quality_attributes, intents, \
              failure_flags))
+            time.sleep(2) # TODO Check for populated
             ros.ros_command_takeoff(alt)
             ros.ros_command_goto(target)
             ros.ros_command_land(alt, False)
@@ -403,6 +453,14 @@ def check_json(json_file):
         print Log('JSON file meets format requirements.')
 
 
+def euclidean(a, b):
+    assert isinstance(a, tuple) and isinstance(b, tuple)
+    assert len(a) != []
+    assert len(a) == len(b)
+    d = sum((x - y) ** 2 for (x, y) in zip(a, b))
+    return math.sqrt(d)
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print ('Please provide a mission description file. (JSON)')
@@ -410,8 +468,13 @@ if __name__ == "__main__":
     with open(sys.argv[1]) as file:
         json_file = json.load(file)
 
+    #check_json(json_file)
+    #mission = Mission(json_file['MDescription'])
+    # done this way since the only mission currently supported is point to point
+    #mission_results = mission.execute()
+
+
     check_json(json_file)
     mission = Mission(json_file['MDescription'])
     # done this way since the only mission currently supported is point to point
     mission_results = mission.execute()
-    
