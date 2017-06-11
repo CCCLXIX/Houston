@@ -1,9 +1,7 @@
 Jun 10, 2017
 1) Houston:
-	- Fix the displacement bug.
 	- Write documentation.
 	- Write report into json format
-	- Me sure failure flags work correctly.
 	- Finish intents.
 	- Add multiple point to point
 	- Add extraction
