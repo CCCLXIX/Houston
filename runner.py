@@ -24,7 +24,7 @@ HOME_COORDINATES              = (-35.3632607, 149.1652351)
 ERROR_LIMIT_DISTANCE          = .4 # 30cm TODO: pick a better name 
 TIME_INFORM_RATE              = 10 # seconds. How often log time
 QUALITY_ATTRUBUTE_INFORM_RATE = 5  # seconds. 
-
+STABLE_BUFFER_TIME            = 4  # Seconds time to wait after each command 
 
 
 class Error(object):
@@ -68,46 +68,59 @@ class ROSHandler(object):
 
         self.global_alt                 = [0,0]
         
-    def check_command_completion(self, _type, alt, expected_coor, pose, pub):
+    def check_goto_completion(self, expected_coor, pose, pub):
         local_action_time = time.time()
         success = True
-        if _type == 'takeoff':
-            while ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
-            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2)))\
-            and self.mission_on:
-                local_action_time = self.inform_time(local_action_time, 5, \
-                    'Waiting to reach alt. Goal: '+ str(alt) +' - Current: '\
-                    +str(self.current_local_position[2]))
-            if ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
-            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2))):
-                success = False
-        elif _type == 'land':
-            while self.current_local_position[2] >= ERROR_LIMIT_DISTANCE and \
-            self.mission_on:
-                local_action_time = self.inform_time(local_action_time, 5, \
-                    'Waiting to reach land. Goal: ~0' +' - Current: '\
-                    +str(self.current_local_position[2]))
-            if self.current_local_position[2] >= ERROR_LIMIT_DISTANCE:
-                success = False
-        elif _type == 'goto':
-            r = rospy.Rate(10)
-            self.lock_min_max_height = True
-            while great_circle(self.current_global_coordinates,expected_coor).meters\
+        r = rospy.Rate(10)
+        self.lock_min_max_height = True
+        while great_circle(self.current_global_coordinates,expected_coor).meters\
              >= ERROR_LIMIT_DISTANCE and self.mission_on: 
-                r.sleep()
-                distance_traveled = great_circle(self.initial_global_coordinates, \
-                    self.current_global_coordinates).meters
-                pub.publish(pose)
-                local_action_time = self.inform_time(local_action_time, 2,\
-                 'Remaining: ' + str(great_circle(self.current_global_coordinates,expected_coor).meters))
-            if great_circle(self.current_global_coordinates,expected_coor).meters\
-             >= ERROR_LIMIT_DISTANCE:
-                success = False
-            self.lock_min_max_height = False
+            r.sleep()
+            pub.publish(pose)
+            local_action_time = self.inform_time(local_action_time, 2,\
+                'Remaining: ' + str(great_circle(self.current_global_coordinates,\
+                    expected_coor).meters))
+        if great_circle(self.current_global_coordinates,expected_coor).meters\
+            >= ERROR_LIMIT_DISTANCE:
+            success = False
+        self.lock_min_max_height = False
 
+        time.sleep(STABLE_BUFFER_TIME)
+        return success
+
+    def check_land_completion(self, alt):
+        local_action_time = time.time()
+        success = True
+        self.lock_min_max_height = True
+        while self.current_local_position[2] >= ERROR_LIMIT_DISTANCE and \
+            self.mission_on:
+            local_action_time = self.inform_time(local_action_time, 5, \
+            'Waiting to reach land. Goal: ~0' +' - Current: '\
+                +str(self.current_local_position[2]))
+        self.lock_min_max_height = False
+        if self.current_local_position[2] >= ERROR_LIMIT_DISTANCE:
+            success = False
+        time.sleep(STABLE_BUFFER_TIME)
         return success
 
 
+
+    def check_takeoff_completion(self, alt):
+        local_action_time = time.time()
+        success = True
+        lock_min_max_height = True
+        while ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
+            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2)))\
+            and self.mission_on:
+                local_action_time = self.inform_time(local_action_time, 5, \
+                'Waiting to reach alt. Goal: '+ str(alt) +' - Current: '\
+                +str(self.current_local_position[2]))
+        lock_min_max_height = False
+        if ((alt+(ERROR_LIMIT_DISTANCE/2)) >= self.current_local_position[2]) \
+            and (self.current_local_position[2] <= (alt-(ERROR_LIMIT_DISTANCE/2))):
+            success = False
+        time.sleep(STABLE_BUFFER_TIME)
+        return success
 
     # Sets the system to GUIDED, arms and takesoff to a given altitude.
     # TODO: add mode to mission parameters? 
@@ -133,28 +146,28 @@ class ROSHandler(object):
             Log("System Taking off...")
         else:
             Error("System did not take off.")
-        succes = self.check_command_completion('takeoff', alt, None, None, None)
+        succes = self.check_takeoff_completion(alt)
         if succes:
             Log('System reached height')
         else:
-            Log('System did not reach height')
+            Log('System did not reach height on time')
         
         
     #def goto_command(self, lat, longitud):
 
     # Makes a service call to coomand the system to land
-    def ros_command_land(self, alt, last_command):
+    def ros_command_land(self, alt):
         land = rospy.ServiceProxy('/mavros/cmd/land', CommandTOL)
         res = land(0, 0, 0, 0, alt)
         if res:
             Log("System landing...")
         else:
             Error("System is not landing.")
-        success = self.check_command_completion('land', None, None, None, None)
+        success = self.check_land_completion(alt)
         if success:
             Log('System has landed')
         else:
-            Log('System did not land')
+            Log('System did not land on time ')
 
 
     def get_current_x_y(self):
@@ -193,11 +206,19 @@ class ROSHandler(object):
                     self.initial_global_coordinates[0])))
         return expected_lat, expected_long
 
+    def reset_initial_global_position(self):
+        self.initial_set[0] = False
+        self.initial_set[1] = False
+
 
     # Commands the system to a given location. Verifies the end of the publications
     # by comparing the current position with the expected position.
     # Need to add z for angular displacement. 
-    def ros_command_goto(self, target):
+    def ros_command_goto(self, target, mptp):
+        # It makes sure that the initial position is updated in order to calculate
+        # the next coordinate 
+        if mptp:
+                self.reset_initial_global_position()
         goto_publisher = rospy.Publisher('/mavros/setpoint_position/local',\
             PoseStamped, queue_size=10)
         pose = PoseStamped()
@@ -212,6 +233,7 @@ class ROSHandler(object):
         # 0,0 is set to HOME which is the starting position of the system. 
         if target[0] == 0 and target[1] == 0:
             expected_coor = (HOME_COORDINATES[0], HOME_COORDINATES[1])
+            
             expected_distance = great_circle(self.initial_global_coordinates, \
                 expected_coor).meters
             Log('Using home coordinates: initial' + str(self.initial_global_coordinates)\
@@ -230,16 +252,14 @@ class ROSHandler(object):
             expected_distance = great_circle(self.initial_global_coordinates, \
                 expected_coor).meters
 
-        distance_traveled = great_circle(self.initial_global_coordinates, \
-            self.current_global_coordinates).meters
 
-        Log('Expected distance to travel: ' + str(expected_distance))
-        success = self.check_command_completion('goto', None, expected_coor, pose, \
-            goto_publisher)
+        self.current_global_coordinates = self.initial_global_coordinates
+        Log('Remaining distance to travel :  ' + str( great_circle(self.current_global_coordinates,expected_coor).meters))
+        success = self.check_goto_completion(expected_coor, pose, goto_publisher)
         if success:
             Log('Position reached')
         else:
-            Log('System did not reach position')
+            Log('System did not reach position on time')
 
     # Callback for local position sub. It also updates the min and the max height
     def ros_monitor_callback_local_position(self, data):
@@ -312,14 +332,12 @@ class ROSHandler(object):
     def ros_monitor(self, quality_attributes, intents, failure_flags):        
         local_pos_sub   = rospy.Subscriber('/mavros/local_position/pose', \
             PoseStamped \
-         , self.ros_monitor_callback_local_position)
+         , self.ros_monitor_callback_local_position, queue_size=10)
         global_pos_sub  = rospy.Subscriber('/mavros/global_position/global', \
             NavSatFix \
          , self.ros_monitor_callback_global_position)
         battery_sub     = rospy.Subscriber('/mavros/battery', BatteryStatus, \
           self.ros_monitor_callback_battery)
-        
-        
 
         report_data = {'QualityAttributes':[],'FailureFlags':'None'}
         temp_time   = time.time() #time used for failure flags and time inform
@@ -340,6 +358,9 @@ class ROSHandler(object):
         report_generator = Report(self, report_data)
         report_generator.generate()
 
+    def ros_set_mission_over(self):
+        self.mission_on = False
+
 class Report(object):
     def __init__(self, ros_handler_self ,report_data):
         self.report_data      = report_data
@@ -348,32 +369,6 @@ class Report(object):
     def generate(self):
         print self.report_data['QualityAttributes']
         print self.report_data['FailureFlags']
-
-#    def check_intents(self, intents):
-#       current_data = intents
-#        inequality_simbols = {'time':intents['Time'].split(':')[0], 'battery':intents['Battery'].split(':')[0]}
-#        values = {'time':intents['Time'].split(':')[1], 'battery':intents['Battery'].split(':')[1]}
-#
-#        if inequality_simbols['time'] == '>' and time.time() - self.starting_time > values['time']:
-#            current_data['Time'] = True
-#        else:
-#            current_data['Time'] = False # Hmm
-#        if inequality_simbols['time'] == '<' and time.time() - self.starting_time < values['time']:
-#            current_data['Time'] = True
-#        else:
-#            current_data['Time'] = False
-#
-#        if inequality_simbols['battery'] == '>' and self.battery[0] - self.battery[1] > values['battery']:
-#            current_data['battery'] = True
-#        else:
-#            current_data['battery'] = False # Hmm
-#        if inequality_simbols['battery'] == '<' and self.battery[0] - self.battery[1] < values['battery']:
-#            current_data['battery'] = True
-#        else:
-#            current_data['battery'] = False
-#
-#        if self.min_max_height + ERROR_LIMIT_DISTANCE >=
-
 
 
 class Mission(object):
@@ -389,12 +384,29 @@ class Mission(object):
              failure_flags))
             time.sleep(2) # TODO Check for populated
             ros.ros_command_takeoff(alt)
-            ros.ros_command_goto(target)
-            ros.ros_command_land(alt, False)
+            ros.ros_command_goto(target, False)
+            ros.ros_command_land(alt)
+            ros.ros_set_mission_over()
 
         except:
             #Error('unable to start thread').thread_error()
             raise 
+
+    def execute_multiple_point_to_point(self, targets, alt, quality_attributes,\
+        intents, failure_flags):
+        ros = ROSHandler('mavros')
+        main = rospy.init_node('HoustonMonitor')
+        try:
+            thread.start_new_thread(ros.ros_monitor, (quality_attributes, intents, \
+                failure_flags))
+            time.sleep(2)
+            ros.ros_command_takeoff(alt)
+            for target in targets:
+                ros.ros_command_goto(target, True)
+            ros.ros_command_land(alt)
+            ros.ros_set_mission_over()
+        except:
+            raise
 
     # Checks that all the required parameters for a correct mission run are present 
     def check_parameters(self, parameters):
@@ -421,6 +433,9 @@ class Mission(object):
     def execute(self):
         mission_action = self.mission_info['Action']
         parameter_pass = self.check_parameters(self.mission_info)
+        quality_attributes = self.mission_info['QualityAttributes']
+        intents = self.mission_info['Intents']
+        failure_flags = self.mission_info['FailureFlags']
         if (mission_action['Type'] == 'PTP') and parameter_pass:
             start_x = float(mission_action['x'])
             start_y = float(mission_action['y'])
@@ -428,13 +443,23 @@ class Mission(object):
             end_x   = float(mission_action['x_d'])
             end_y   = float(mission_action['y_d'])
             end_z   = float(mission_action['y_d'])
-            alt     = float(mission_action['Alt'])
-            quality_attributes = self.mission_info['QualityAttributes']
-            intents = self.mission_info['Intents']
-            failure_flags = self.mission_info['FailureFlags']
+            alt     = float(mission_action['alt'])
             locations = (start_x, start_y, start_z, end_x, end_y, end_z)
             self.execute_point_to_point(locations, alt, quality_attributes, intents,\
              failure_flags)
+        elif (mission_action['Type'] == 'MPTP' and parameter_pass):
+            locations = []
+            for location in mission_action['Locations']:
+                start_x = float(location['x'])
+                start_y = float(location['y'])
+                start_z = float(location['z'])
+                end_x   = float(location['x_d'])
+                end_y   = float(location['y_d'])
+                end_z   = float(location['y_d'])
+                alt     = float(location['alt'])
+                locations.append((start_x,start_y,start_z,end_x,end_y,end_z,alt))
+            self.execute_multiple_point_to_point(locations,alt,quality_attributes,\
+                intents,failure_flags)
         else:
             print 'Mission type found not supported'
 

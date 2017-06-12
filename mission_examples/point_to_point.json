@@ -10,9 +10,9 @@
 			"Action":
 			{
 				"Type": "PTP",
-				"Alt" : "5.0",
-				"x":	"5.0",
-				"y":	"5.0",
+				"alt" : "5.0",
+				"x":	"0.0",
+				"y":	"0.0",
 				"z":	"5.0",
 				"x_d":	"0.0",
 				"y_d":	"0.0",
@@ -20,6 +20,7 @@
 			},
 			"QualityAttributes":
 			{
+				"ReportRate":"2",
 				"Time": "True",
 				"Battery": "False",
 				"MaxHeight": "True",
@@ -36,9 +37,10 @@
 
 			"FailureFlags":
 			{
-				"Time":	"30.0",
+				"Time":	"40.0",
 				"Battery": "90",
-				"SystemShutdown":"True"	
+				"SystemShutdown":"True",
+				"MaxHeight":      "30"
 			}
 						
 		}
